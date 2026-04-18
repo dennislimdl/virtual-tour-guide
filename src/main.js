@@ -69,6 +69,37 @@ async function fetchNearbyLandmarks(lat, lon, radiusM) {
   }));
 }
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function wikiArticleUrl(title) {
+  const encoded = encodeURIComponent(title.replace(/ /g, "_"));
+  return `https://en.wikipedia.org/wiki/${encoded}`;
+}
+
+/** iOS Safari only reliably starts speech during the user gesture; voices load async. */
+function pickEnglishVoice() {
+  const voices = window.speechSynthesis?.getVoices?.() ?? [];
+  return (
+    voices.find((v) => v.lang.startsWith("en-US")) ||
+    voices.find((v) => v.lang.startsWith("en")) ||
+    voices[0]
+  );
+}
+
+function ensureVoicesLoaded() {
+  if (!window.speechSynthesis) return;
+  speechSynthesis.getVoices();
+  speechSynthesis.onvoiceschanged = () => {
+    speechSynthesis.getVoices();
+  };
+}
+
 async function fetchIntroText(title) {
   const url = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&titles=${encodeURIComponent(title)}&format=json&origin=*`;
   const res = await fetch(url);
@@ -86,17 +117,20 @@ async function fetchIntroText(title) {
   return text;
 }
 
-function speakIntro(text, onEnd) {
+function speakUtterance(text, onEnd, { cancelFirst = true } = {}) {
   if (!window.speechSynthesis) {
     onEnd?.();
     return;
   }
-  window.speechSynthesis.cancel();
+  if (cancelFirst) speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
+  u.lang = "en-US";
   u.rate = 0.95;
+  const voice = pickEnglishVoice();
+  if (voice) u.voice = voice;
   u.onend = () => onEnd?.();
   u.onerror = () => onEnd?.();
-  window.speechSynthesis.speak(u);
+  speechSynthesis.speak(u);
 }
 
 function createApp() {
@@ -108,31 +142,57 @@ function createApp() {
       <div id="map" class="map" role="application" aria-label="Map"></div>
       <div class="map-overlay map-overlay--top">
         <p class="map-title">Tour Guide</p>
-        <p class="map-hint" id="map-hint">Free map (OpenStreetMap). Pan or zoom — landmarks match the visible area.</p>
+        <p class="map-hint" id="map-hint">Street map (not satellite). Zoom in to see blocks and building shapes. Use the layers control (top-right) to switch styles.</p>
       </div>
       <button type="button" class="btn-recenter" id="btn-recenter" title="Center on my location" aria-label="Center on my location">
         ⊕
       </button>
-      <div class="audio-bar" id="audio-bar" hidden>
-        <span class="audio-bar__icon" aria-hidden="true">🔊</span>
-        <p class="audio-bar__text" id="audio-bar-text"></p>
-        <button type="button" class="btn-stop" id="btn-stop-audio" aria-label="Stop speaking">Stop</button>
+      <div class="landmark-sheet" id="landmark-sheet" hidden aria-hidden="true">
+        <button type="button" class="landmark-sheet__backdrop" id="landmark-backdrop" tabindex="-1" aria-label="Close"></button>
+        <div
+          class="landmark-sheet__panel"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="landmark-sheet-title"
+        >
+          <header class="landmark-sheet__header">
+            <h2 class="landmark-sheet__title" id="landmark-sheet-title"></h2>
+            <button type="button" class="landmark-sheet__close" id="landmark-sheet-close" aria-label="Close">×</button>
+          </header>
+          <div class="landmark-sheet__body" id="landmark-sheet-body"></div>
+          <footer class="landmark-sheet__footer">
+            <button type="button" class="btn-listen" id="btn-listen" disabled>
+              Listen to introduction
+            </button>
+            <button type="button" class="btn-stop-audio" id="btn-stop-speech" hidden>
+              Stop audio
+            </button>
+          </footer>
+        </div>
       </div>
     </div>
   `;
 
+  ensureVoicesLoaded();
+
   const mapEl = app.querySelector("#map");
   const hintEl = app.querySelector("#map-hint");
-  const audioBar = app.querySelector("#audio-bar");
-  const audioText = app.querySelector("#audio-bar-text");
   const btnRecenter = app.querySelector("#btn-recenter");
-  const btnStop = app.querySelector("#btn-stop-audio");
+  const landmarkSheet = app.querySelector("#landmark-sheet");
+  const landmarkBackdrop = app.querySelector("#landmark-backdrop");
+  const landmarkTitle = app.querySelector("#landmark-sheet-title");
+  const landmarkBody = app.querySelector("#landmark-sheet-body");
+  const btnLandmarkClose = app.querySelector("#landmark-sheet-close");
+  const btnListen = app.querySelector("#btn-listen");
+  const btnStopSpeech = app.querySelector("#btn-stop-speech");
 
   let map;
   let userMarker;
   const landmarkMarkers = [];
   let userPos = null;
   let loadToken = 0;
+  /** @type {string | null} */
+  let currentIntroText = null;
 
   function clearLandmarkMarkers() {
     while (landmarkMarkers.length) {
@@ -165,7 +225,7 @@ function createApp() {
         landmarkMarkers.push(marker);
       }
 
-      hintEl.textContent = `${raw.length} place${raw.length === 1 ? "" : "s"} in view (~${formatRadius(radiusM)} search). Tap a pin for audio.`;
+      hintEl.textContent = `${raw.length} place${raw.length === 1 ? "" : "s"} in view (~${formatRadius(radiusM)} search). Tap a pin for details.`;
     } catch (e) {
       if (myToken !== loadToken) return;
       hintEl.textContent =
@@ -180,28 +240,72 @@ function createApp() {
     return `${(m / 1000).toFixed(1)} km`;
   }
 
-  async function onLandmarkClick(place) {
+  function closeLandmarkSheet() {
     window.speechSynthesis?.cancel();
-    audioBar.hidden = false;
-    audioText.textContent = `${place.title} — loading…`;
-
-    try {
-      const text = await fetchIntroText(place.title);
-      audioText.textContent = place.title;
-      speakIntro(text, () => {
-        audioBar.hidden = true;
-      });
-    } catch (e) {
-      const msg =
-        e instanceof Error ? e.message : "Could not read introduction.";
-      audioText.textContent = msg;
-      speakIntro(`Sorry. ${msg}`);
-    }
+    currentIntroText = null;
+    btnStopSpeech.hidden = true;
+    landmarkSheet.hidden = true;
+    landmarkSheet.setAttribute("aria-hidden", "true");
   }
 
-  btnStop.addEventListener("click", () => {
+  function openLandmarkSheet(place) {
     window.speechSynthesis?.cancel();
-    audioBar.hidden = true;
+    btnStopSpeech.hidden = true;
+    currentIntroText = null;
+    landmarkTitle.textContent = place.title;
+    landmarkBody.innerHTML =
+      '<p class="landmark-sheet__loading">Loading information…</p>';
+    btnListen.disabled = true;
+    landmarkSheet.hidden = false;
+    landmarkSheet.setAttribute("aria-hidden", "false");
+
+    void (async () => {
+      try {
+        const text = await fetchIntroText(place.title);
+        currentIntroText = text;
+        landmarkBody.innerHTML = `
+          <p class="landmark-sheet__intro">${escapeHtml(text)}</p>
+          <p class="landmark-sheet__wiki">
+            <a href="${wikiArticleUrl(place.title)}" target="_blank" rel="noopener noreferrer">Open full article on Wikipedia</a>
+          </p>`;
+        btnListen.disabled = !window.speechSynthesis;
+        btnListen.title = window.speechSynthesis
+          ? ""
+          : "Speech is not available in this browser.";
+      } catch (e) {
+        const msg =
+          e instanceof Error ? e.message : "Could not load information.";
+        landmarkBody.innerHTML = `<p class="landmark-sheet__error">${escapeHtml(msg)}</p>`;
+        btnListen.disabled = true;
+        btnListen.title = "";
+      }
+    })();
+  }
+
+  function onLandmarkClick(place) {
+    openLandmarkSheet(place);
+  }
+
+  btnLandmarkClose.addEventListener("click", closeLandmarkSheet);
+  landmarkBackdrop.addEventListener("click", closeLandmarkSheet);
+
+  btnListen.addEventListener("click", () => {
+    if (!currentIntroText) return;
+    btnStopSpeech.hidden = false;
+    speakUtterance(currentIntroText, () => {
+      btnStopSpeech.hidden = true;
+    });
+  });
+
+  btnStopSpeech.addEventListener("click", () => {
+    window.speechSynthesis?.cancel();
+    btnStopSpeech.hidden = true;
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !landmarkSheet.hidden) {
+      closeLandmarkSheet();
+    }
   });
 
   function setUserMarkerPosition(lat, lng) {
@@ -218,13 +322,42 @@ function createApp() {
   btnRecenter.addEventListener("click", recenterMap);
 
   function initMap(lat, lng, zoom) {
-    map = L.map(mapEl, { zoomControl: true }).setView([lat, lng], zoom);
-
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    map = L.map(mapEl, {
+      zoomControl: true,
       maxZoom: 19,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-    }).addTo(map);
+    }).setView([lat, lng], zoom);
+
+    const attrOsm =
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
+    const attrCarto = `${attrOsm} &copy; <a href="https://carto.com/attributions">CARTO</a>`;
+
+    // Carto "Voyager": street-focused; building footprints show in many areas when zoomed in (not 3D, not satellite).
+    const streetsLayer = L.tileLayer(
+      "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
+      {
+        maxZoom: 19,
+        attribution: attrCarto,
+      },
+    );
+
+    const standardLayer = L.tileLayer(
+      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      {
+        maxZoom: 19,
+        attribution: attrOsm,
+      },
+    );
+
+    streetsLayer.addTo(map);
+
+    L.control.layers(
+      {
+        "Streets (buildings)": streetsLayer,
+        "Standard": standardLayer,
+      },
+      null,
+      { position: "topright", collapsed: true },
+    ).addTo(map);
 
     userMarker = L.circleMarker([lat, lng], {
       radius: 10,
