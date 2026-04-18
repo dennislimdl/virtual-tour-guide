@@ -82,14 +82,80 @@ function wikiArticleUrl(title) {
   return `https://en.wikipedia.org/wiki/${encoded}`;
 }
 
-/** iOS Safari only reliably starts speech during the user gesture; voices load async. */
-function pickEnglishVoice() {
-  const voices = window.speechSynthesis?.getVoices?.() ?? [];
-  return (
-    voices.find((v) => v.lang.startsWith("en-US")) ||
-    voices.find((v) => v.lang.startsWith("en")) ||
-    voices[0]
-  );
+/**
+ * Prefer voices that tend to sound more natural (neural / premium / common “assistant” names).
+ */
+function scoreVoiceForTourGuide(v) {
+  const n = (v.name || "").toLowerCase();
+  let s = 0;
+  if (/neural|premium|enhanced|natural|wavenet/i.test(n)) s += 45;
+  if (/google us english|google uk english|google english/i.test(n)) s += 38;
+  if (
+    /samantha|karen|aaron|nicky|fiona|daniel|tessa|moira|martha|alice|victoria|serena|joanna|kendra|kimberly|emma|ivy|susan|michelle|amelie|flo/i.test(
+      n,
+    )
+  )
+    s += 30;
+  if (v.localService) s += 12;
+  if (v.lang === "en-US") s += 18;
+  else if (v.lang.startsWith("en-GB")) s += 14;
+  else if (v.lang.startsWith("en-AU")) s += 10;
+  else if (v.lang.startsWith("en")) s += 6;
+  if (/zira|stephen|male robot/i.test(n)) s -= 20;
+  return s;
+}
+
+function pickTourGuideVoice() {
+  const all = window.speechSynthesis?.getVoices?.() ?? [];
+  const english = all.filter((v) => v.lang.startsWith("en"));
+  const pool = english.length ? english : all;
+  if (pool.length === 0) return null;
+  return [...pool].sort(
+    (a, b) => scoreVoiceForTourGuide(b) - scoreVoiceForTourGuide(a),
+  )[0];
+}
+
+function buildTourGuideParts(title, wikiText) {
+  const welcome = `Welcome! I'm really glad you're exploring with us today. Our next stop is ${title}. Let me tell you what makes this place worth your time.`;
+  const story = wikiText.trim();
+  return { welcome, story };
+}
+
+function speakTourGuide(title, wikiText, onEnd) {
+  if (!window.speechSynthesis) {
+    onEnd?.();
+    return;
+  }
+  speechSynthesis.getVoices();
+  speechSynthesis.cancel();
+
+  const { welcome, story } = buildTourGuideParts(title, wikiText);
+  const voice = pickTourGuideVoice();
+  const applyVoice = (u) => {
+    u.lang = "en-US";
+    u.volume = 1;
+    if (voice) u.voice = voice;
+  };
+
+  const partWelcome = new SpeechSynthesisUtterance(welcome);
+  applyVoice(partWelcome);
+  partWelcome.rate = 0.91;
+  partWelcome.pitch = 1.06;
+
+  const partStory = new SpeechSynthesisUtterance(story);
+  applyVoice(partStory);
+  partStory.rate = 0.88;
+  partStory.pitch = 1.04;
+
+  const done = () => onEnd?.();
+  partWelcome.onerror = done;
+  partStory.onerror = done;
+  partStory.onend = done;
+  partWelcome.onend = () => {
+    speechSynthesis.speak(partStory);
+  };
+
+  speechSynthesis.speak(partWelcome);
 }
 
 function ensureVoicesLoaded() {
@@ -115,22 +181,6 @@ async function fetchIntroText(title) {
   if (text.length > 1200) text = `${text.slice(0, 1200).trim()}…`;
   if (!text) throw new Error("No introduction text for this place.");
   return text;
-}
-
-function speakUtterance(text, onEnd, { cancelFirst = true } = {}) {
-  if (!window.speechSynthesis) {
-    onEnd?.();
-    return;
-  }
-  if (cancelFirst) speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "en-US";
-  u.rate = 0.95;
-  const voice = pickEnglishVoice();
-  if (voice) u.voice = voice;
-  u.onend = () => onEnd?.();
-  u.onerror = () => onEnd?.();
-  speechSynthesis.speak(u);
 }
 
 function createApp() {
@@ -193,6 +243,8 @@ function createApp() {
   let loadToken = 0;
   /** @type {string | null} */
   let currentIntroText = null;
+  /** @type {string | null} */
+  let currentLandmarkTitle = null;
 
   function clearLandmarkMarkers() {
     while (landmarkMarkers.length) {
@@ -243,6 +295,7 @@ function createApp() {
   function closeLandmarkSheet() {
     window.speechSynthesis?.cancel();
     currentIntroText = null;
+    currentLandmarkTitle = null;
     btnStopSpeech.hidden = true;
     landmarkSheet.hidden = true;
     landmarkSheet.setAttribute("aria-hidden", "true");
@@ -252,6 +305,7 @@ function createApp() {
     window.speechSynthesis?.cancel();
     btnStopSpeech.hidden = true;
     currentIntroText = null;
+    currentLandmarkTitle = null;
     landmarkTitle.textContent = place.title;
     landmarkBody.innerHTML =
       '<p class="landmark-sheet__loading">Loading information…</p>';
@@ -263,6 +317,7 @@ function createApp() {
       try {
         const text = await fetchIntroText(place.title);
         currentIntroText = text;
+        currentLandmarkTitle = place.title;
         landmarkBody.innerHTML = `
           <p class="landmark-sheet__intro">${escapeHtml(text)}</p>
           <p class="landmark-sheet__wiki">
@@ -290,9 +345,9 @@ function createApp() {
   landmarkBackdrop.addEventListener("click", closeLandmarkSheet);
 
   btnListen.addEventListener("click", () => {
-    if (!currentIntroText) return;
+    if (!currentIntroText || !currentLandmarkTitle) return;
     btnStopSpeech.hidden = false;
-    speakUtterance(currentIntroText, () => {
+    speakTourGuide(currentLandmarkTitle, currentIntroText, () => {
       btnStopSpeech.hidden = true;
     });
   });
