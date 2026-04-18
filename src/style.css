@@ -1,0 +1,207 @@
+:root {
+  --bg: #0f1419;
+  --surface: rgba(26, 35, 50, 0.92);
+  --text: #e8eef5;
+  --muted: #8b9cb3;
+  --accent: #3d9eff;
+  --danger: #ff6b6b;
+  --radius: 14px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+}
+
+#app {
+  min-height: 100dvh;
+  margin: 0;
+}
+
+.map-shell {
+  position: relative;
+  width: 100%;
+  min-height: 100dvh;
+}
+
+.map {
+  width: 100%;
+  height: 100dvh;
+  min-height: 100dvh;
+  z-index: 0;
+}
+
+.leaflet-container {
+  font-family: inherit;
+}
+
+.map-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  padding-left: max(0.75rem, var(--safe-top));
+  padding-right: 0.75rem;
+  padding-bottom: 0.5rem;
+  pointer-events: none;
+}
+
+.map-overlay--top {
+  top: 0;
+  z-index: 1000;
+  padding-top: calc(0.65rem + var(--safe-top));
+  background: linear-gradient(
+    to bottom,
+    rgba(15, 20, 25, 0.88) 0%,
+    rgba(15, 20, 25, 0.45) 70%,
+    transparent 100%
+  );
+}
+
+.map-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+.map-hint {
+  margin: 0.25rem 0 0;
+  font-size: 0.78rem;
+  color: rgba(232, 238, 245, 0.85);
+  max-width: 20rem;
+  line-height: 1.35;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+.btn-recenter {
+  position: absolute;
+  bottom: calc(5.5rem + var(--safe-bottom));
+  right: 0.75rem;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: none;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  touch-action: manipulation;
+  z-index: 1001;
+}
+
+.btn-recenter:active {
+  transform: scale(0.96);
+}
+
+.audio-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.75rem 1rem calc(0.85rem + var(--safe-bottom));
+  background: rgba(15, 20, 25, 0.94);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  z-index: 1002;
+}
+
+.audio-bar__icon {
+  flex-shrink: 0;
+  font-size: 1.1rem;
+}
+
+.audio-bar__text {
+  flex: 1;
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.35;
+  min-width: 0;
+}
+
+.btn-stop {
+  flex-shrink: 0;
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.setup-screen {
+  max-width: 26rem;
+  margin: 0 auto;
+  padding: calc(1.25rem + var(--safe-top)) 1.25rem calc(1.5rem + var(--safe-bottom));
+}
+
+.setup-screen h1 {
+  font-size: 1.35rem;
+  font-weight: 650;
+  margin: 0 0 0.5rem;
+}
+
+.setup-lead {
+  color: var(--muted);
+  margin: 0 0 1rem;
+}
+
+.setup-steps {
+  margin: 0;
+  padding-left: 1.2rem;
+  color: var(--text);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.setup-steps li {
+  margin-bottom: 0.65rem;
+}
+
+.setup-steps a {
+  color: var(--accent);
+}
+
+.setup-steps code,
+.setup-steps pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 0.82rem;
+}
+
+.setup-steps pre {
+  margin: 0.5rem 0 0;
+  padding: 0.65rem 0.75rem;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 8px;
+  overflow-x: auto;
+}

@@ -1,0 +1,9 @@
+node_modules
+dist
+dev-dist
+.vite
+.DS_Store
+.vercel
+.env
+.env.local
+.env.*.local
