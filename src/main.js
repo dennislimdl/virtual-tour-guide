@@ -665,6 +665,9 @@ function createApp() {
     userMarker.bindTooltip("Your location", { permanent: false });
 
     map.on("moveend", () => debouncedRefresh());
+    // Leaflet doesn't fire "moveend" for the initial setView() above, so
+    // without this the map would sit empty until the user pans or zooms.
+    refreshLandmarks();
 
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(
