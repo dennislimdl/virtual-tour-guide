@@ -1,6 +1,9 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenAI, ApiError } from "@google/genai";
 
-const MODEL = process.env.ANTHROPIC_MODEL || "claude-opus-5";
+// Gemini 2.5 Flash has a free tier via Google AI Studio (no billing required).
+// Override with GEMINI_MODEL if you want a different free-tier model, e.g.
+// "gemini-2.5-flash-lite" for a higher daily request quota.
+const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
 const GUIDE_PERSONA = `You are Ava, a warm, knowledgeable local tour guide speaking out loud to a visitor standing right beside you. You are not reading an article — you're having a real, in-person conversation, the way an experienced local guide would.
 
@@ -13,7 +16,7 @@ Style rules:
 
 let client;
 function getClient() {
-  if (!client) client = new Anthropic();
+  if (!client) client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   return client;
 }
 
@@ -23,10 +26,10 @@ export default async function handler(req, res) {
     return;
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) {
+  if (!process.env.GEMINI_API_KEY) {
     res
       .status(503)
-      .json({ error: "AI guide is not configured (missing ANTHROPIC_API_KEY)." });
+      .json({ error: "AI guide is not configured (missing GEMINI_API_KEY)." });
     return;
   }
 
@@ -61,6 +64,13 @@ export default async function handler(req, res) {
     res.status(200).json({ text });
   } catch (err) {
     console.error("guide api error", err);
+    if (err instanceof ApiError && err.status === 429) {
+      res.status(429).json({
+        error:
+          "The AI guide hit its free-tier rate limit. Please wait a moment and try again.",
+      });
+      return;
+    }
     res
       .status(502)
       .json({ error: "The AI guide had trouble responding. Please try again." });
@@ -74,34 +84,36 @@ async function narrate(landmark) {
     : "(no reference material available — speak from general knowledge, and if you're not confident about specifics, keep it general rather than inventing facts.)";
   const userText = `We just arrived at "${landmark.title}". Here is some reference material for grounding only — do not read it verbatim, do not quote it directly, and do not mention "Wikipedia" or "according to":\n\n${referenceBlock}\n\nGive your spoken introduction to this place now.`;
 
-  const resp = await getClient().messages.create({
+  const resp = await getClient().models.generateContent({
     model: MODEL,
-    max_tokens: 1024,
-    system: GUIDE_PERSONA,
-    output_config: { effort: "low" },
-    messages: [{ role: "user", content: userText }],
+    contents: userText,
+    config: {
+      systemInstruction: GUIDE_PERSONA,
+      maxOutputTokens: 500,
+      temperature: 0.9,
+    },
   });
   return extractText(resp);
 }
 
 async function chat(landmark, history, question) {
-  // The API requires the first message to have role "user". Our history can
-  // start with an assistant-only narration turn (a question asked right after
-  // the guide's intro, before any user turn exists) — skip leading assistant
-  // turns, but keep the last one as a short context note so we don't lose it.
-  const messages = [];
-  let recentAssistantNote = "";
+  // Keep the transcript grounded even if the history starts with a
+  // guide-only narration turn (no prior user turn) — fold it into a short
+  // context note instead of sending it as a leading "model" turn.
+  const contents = [];
+  let recentModelNote = "";
   let sawUserTurn = false;
   for (const turn of history.slice(-12)) {
     if (!turn || (turn.role !== "user" && turn.role !== "assistant")) continue;
-    if (!sawUserTurn && turn.role === "assistant") {
-      recentAssistantNote = String(turn.content || "").slice(0, 500);
+    const geminiRole = turn.role === "assistant" ? "model" : "user";
+    if (!sawUserTurn && geminiRole === "model") {
+      recentModelNote = String(turn.content || "").slice(0, 500);
       continue;
     }
     sawUserTurn = true;
-    messages.push({
-      role: turn.role,
-      content: String(turn.content || "").slice(0, 2000),
+    contents.push({
+      role: geminiRole,
+      parts: [{ text: String(turn.content || "").slice(0, 2000) }],
     });
   }
 
@@ -109,25 +121,29 @@ async function chat(landmark, history, question) {
   if (landmark?.title) {
     contextParts.push(`The visitor is currently standing at "${landmark.title}".`);
   }
-  if (recentAssistantNote) {
-    contextParts.push(`You just told them: "${recentAssistantNote}"`);
+  if (recentModelNote) {
+    contextParts.push(`You just told them: "${recentModelNote}"`);
   }
   const context = contextParts.length ? `(${contextParts.join(" ")}) ` : "";
-  messages.push({ role: "user", content: `${context}${question}`.slice(0, 2000) });
+  contents.push({
+    role: "user",
+    parts: [{ text: `${context}${question}`.slice(0, 2000) }],
+  });
 
-  const resp = await getClient().messages.create({
+  const resp = await getClient().models.generateContent({
     model: MODEL,
-    max_tokens: 1024,
-    system: GUIDE_PERSONA,
-    output_config: { effort: "low" },
-    messages,
+    contents,
+    config: {
+      systemInstruction: GUIDE_PERSONA,
+      maxOutputTokens: 500,
+      temperature: 0.9,
+    },
   });
   return extractText(resp);
 }
 
 function extractText(resp) {
-  const block = resp.content?.find((b) => b.type === "text");
-  const text = block?.text?.trim();
+  const text = resp?.text?.trim();
   if (!text) throw new Error("Empty response from model.");
   return text;
 }
