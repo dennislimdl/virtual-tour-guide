@@ -1,9 +1,9 @@
 import { GoogleGenAI, ApiError } from "@google/genai";
 
-// Gemini 2.5 Flash has a free tier via Google AI Studio (no billing required).
+// Gemini has a free tier via Google AI Studio (no billing required).
 // Override with GEMINI_MODEL if you want a different free-tier model, e.g.
-// "gemini-2.5-flash-lite" for a higher daily request quota.
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+// "gemini-flash-lite-latest" for a higher daily request quota.
+const MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
 const GUIDE_PERSONA = `You are Ava, a warm, knowledgeable local tour guide speaking out loud to a visitor standing right beside you. You are not reading an article — you're having a real, in-person conversation, the way an experienced local guide would.
 
@@ -89,8 +89,13 @@ async function narrate(landmark) {
     contents: userText,
     config: {
       systemInstruction: GUIDE_PERSONA,
-      maxOutputTokens: 500,
+      maxOutputTokens: 400,
       temperature: 0.9,
+      // This model spends part of maxOutputTokens on hidden "thinking"
+      // tokens by default, which was truncating short spoken replies
+      // mid-sentence. A quick conversational reply doesn't need extended
+      // reasoning, so keep thinking minimal.
+      thinkingConfig: { thinkingLevel: "MINIMAL" },
     },
   });
   return extractText(resp);
@@ -135,8 +140,9 @@ async function chat(landmark, history, question) {
     contents,
     config: {
       systemInstruction: GUIDE_PERSONA,
-      maxOutputTokens: 500,
+      maxOutputTokens: 400,
       temperature: 0.9,
+      thinkingConfig: { thinkingLevel: "MINIMAL" },
     },
   });
   return extractText(resp);
