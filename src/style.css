@@ -151,6 +151,27 @@ body {
   transform: scale(0.96);
 }
 
+.gps-badge {
+  position: absolute;
+  bottom: calc(4.25rem + var(--safe-bottom));
+  right: 0.75rem;
+  margin: 0;
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+  z-index: 1001;
+  white-space: nowrap;
+}
+
+.gps-badge--poor {
+  color: var(--danger);
+}
+
 .landmark-sheet {
   position: fixed;
   inset: 0;
