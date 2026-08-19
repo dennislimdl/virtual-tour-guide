@@ -21,6 +21,10 @@ const MAX_RADIUS_M = 50_000;
 const GEO_LIMIT = 45;
 const WALK_PROXIMITY_M = 45;
 const MAX_HISTORY_TURNS = 16;
+// GPS fixes worse than this (meters) are still shown on the map, but are too
+// noisy to trust for triggering a landmark narration — a bad fix could claim
+// you're near a place you're actually 100m from.
+const WALK_ACCURACY_THRESHOLD_M = 50;
 
 function degToRad(d) {
   return (d * Math.PI) / 180;
@@ -254,6 +258,7 @@ function createApp() {
       <button type="button" class="btn-recenter" id="btn-recenter" title="Center on my location" aria-label="Center on my location">
         ⊕
       </button>
+      <p class="gps-badge" id="gps-badge" hidden></p>
       <div class="landmark-sheet" id="landmark-sheet" hidden aria-hidden="true">
         <button type="button" class="landmark-sheet__backdrop" id="landmark-backdrop" tabindex="-1" aria-label="Close"></button>
         <div
@@ -287,6 +292,7 @@ function createApp() {
   const mapEl = app.querySelector("#map");
   const hintEl = app.querySelector("#map-hint");
   const btnRecenter = app.querySelector("#btn-recenter");
+  const gpsBadge = app.querySelector("#gps-badge");
   const btnWalkTour = app.querySelector("#btn-walk-tour");
   const landmarkSheet = app.querySelector("#landmark-sheet");
   const landmarkBackdrop = app.querySelector("#landmark-backdrop");
@@ -300,8 +306,10 @@ function createApp() {
 
   let map;
   let userMarker;
+  let userAccuracyCircle;
   const landmarkMarkers = [];
   let userPos = null;
+  let userAccuracyM = null;
   let loadToken = 0;
   /** @type {string | null} */
   let currentLandmarkTitle = null;
@@ -330,6 +338,9 @@ function createApp() {
 
   function checkProximity(lat, lng) {
     if (!walkingTourActive) return;
+    // A noisy fix could put you "near" a landmark you're actually 100m from
+    // (or hide one you're standing next to) — wait for a trustworthy fix.
+    if (userAccuracyM != null && userAccuracyM > WALK_ACCURACY_THRESHOLD_M) return;
     for (const place of currentLandmarks) {
       if (narratedIds.has(place.pageId)) continue;
       if (narrationQueue.some((p) => p.pageId === place.pageId)) continue;
@@ -603,9 +614,33 @@ function createApp() {
     }
   });
 
-  function setUserMarkerPosition(lat, lng) {
+  function formatAccuracy(m) {
+    if (m < 1000) return `±${Math.round(m)}m`;
+    return `±${(m / 1000).toFixed(1)}km`;
+  }
+
+  function updateGpsBadge(accuracy) {
+    if (accuracy == null) {
+      gpsBadge.hidden = true;
+      return;
+    }
+    gpsBadge.hidden = false;
+    gpsBadge.textContent = `GPS ${formatAccuracy(accuracy)}`;
+    gpsBadge.classList.toggle(
+      "gps-badge--poor",
+      accuracy > WALK_ACCURACY_THRESHOLD_M,
+    );
+  }
+
+  function setUserMarkerPosition(lat, lng, accuracy) {
     userPos = { lat, lng };
+    userAccuracyM = typeof accuracy === "number" ? accuracy : null;
     if (userMarker) userMarker.setLatLng([lat, lng]);
+    if (userAccuracyCircle && userAccuracyM != null) {
+      userAccuracyCircle.setLatLng([lat, lng]);
+      userAccuracyCircle.setRadius(userAccuracyM);
+    }
+    updateGpsBadge(userAccuracyM);
     checkProximity(lat, lng);
   }
 
@@ -616,7 +651,7 @@ function createApp() {
 
   btnRecenter.addEventListener("click", recenterMap);
 
-  function initMap(lat, lng, zoom) {
+  function initMap(lat, lng, zoom, accuracy) {
     map = L.map(mapEl, {
       zoomControl: true,
       maxZoom: 19,
@@ -654,6 +689,17 @@ function createApp() {
       { position: "topright", collapsed: true },
     ).addTo(map);
 
+    // Shows the GPS fix's reported error radius, so it's visible (not just
+    // implied) when a reading is too imprecise to trust for narration.
+    userAccuracyCircle = L.circle([lat, lng], {
+      radius: accuracy || 0,
+      color: "#4285F4",
+      weight: 1,
+      fillColor: "#4285F4",
+      fillOpacity: 0.12,
+      interactive: false,
+    }).addTo(map);
+
     userMarker = L.circleMarker([lat, lng], {
       radius: 10,
       fillColor: "#4285F4",
@@ -663,6 +709,9 @@ function createApp() {
       fillOpacity: 1,
     }).addTo(map);
     userMarker.bindTooltip("Your location", { permanent: false });
+
+    userAccuracyM = typeof accuracy === "number" ? accuracy : null;
+    updateGpsBadge(userAccuracyM);
 
     map.on("moveend", () => debouncedRefresh());
     // Leaflet doesn't fire "moveend" for the initial setView() above, so
@@ -675,6 +724,7 @@ function createApp() {
           setUserMarkerPosition(
             pos.coords.latitude,
             pos.coords.longitude,
+            pos.coords.accuracy,
           );
         },
         () => {},
@@ -696,7 +746,12 @@ function createApp() {
 
   navigator.geolocation.getCurrentPosition(
     (pos) => {
-      initMap(pos.coords.latitude, pos.coords.longitude, 16);
+      initMap(
+        pos.coords.latitude,
+        pos.coords.longitude,
+        16,
+        pos.coords.accuracy,
+      );
     },
     () => {
       initMap(20, 0, 2);
