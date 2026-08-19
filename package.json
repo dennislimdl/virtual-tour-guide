@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "build:preview": "vite build && vite preview",
+    "dev:api": "vercel dev",
     "deploy": "npx vercel"
   },
   "devDependencies": {
@@ -16,6 +17,7 @@
     "vite-plugin-pwa": "^1.2.0"
   },
   "dependencies": {
+    "@google/genai": "^2.17.1",
     "leaflet": "^1.9.4"
   }
 }

@@ -13,11 +13,14 @@ L.Icon.Default.mergeOptions({
 
 const WIKI_GEO =
   "https://en.wikipedia.org/w/api.php?action=query&list=geosearch&format=json&origin=*";
+const GUIDE_API = "/api/guide";
 
 const DEBOUNCE_MS = 550;
 const MIN_RADIUS_M = 80;
 const MAX_RADIUS_M = 50_000;
 const GEO_LIMIT = 45;
+const WALK_PROXIMITY_M = 45;
+const MAX_HISTORY_TURNS = 16;
 
 function degToRad(d) {
   return (d * Math.PI) / 180;
@@ -82,6 +85,10 @@ function wikiArticleUrl(title) {
   return `https://en.wikipedia.org/wiki/${encoded}`;
 }
 
+function wikiLinkHtml(title) {
+  return `<p class="feed-bubble__wiki"><a href="${wikiArticleUrl(title)}" target="_blank" rel="noopener noreferrer">Open full article on Wikipedia</a></p>`;
+}
+
 /**
  * Prefer voices that tend to sound more natural (neural / premium / common “assistant” names).
  */
@@ -115,6 +122,31 @@ function pickTourGuideVoice() {
   )[0];
 }
 
+/** Speak a single, already-natural-sounding line of guide dialogue (LLM narration or chat replies). */
+function speakText(text, onEnd) {
+  if (!window.speechSynthesis) {
+    onEnd?.();
+    return;
+  }
+  speechSynthesis.getVoices();
+  speechSynthesis.cancel();
+
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "en-US";
+  u.volume = 1;
+  u.rate = 0.95;
+  u.pitch = 1.02;
+  const voice = pickTourGuideVoice();
+  if (voice) u.voice = voice;
+
+  const done = () => onEnd?.();
+  u.onerror = done;
+  u.onend = done;
+
+  speechSynthesis.speak(u);
+}
+
+/** Fallback narration (raw Wikipedia extract) used when the AI guide API is unavailable. */
 function buildTourGuideParts(title, wikiText) {
   const welcome = `Welcome! I'm really glad you're exploring with us today. Our next stop is ${title}. Let me tell you what makes this place worth your time.`;
   const story = wikiText.trim();
@@ -166,6 +198,10 @@ function ensureVoicesLoaded() {
   };
 }
 
+function getSpeechRecognitionCtor() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
 async function fetchIntroText(title) {
   const url = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&titles=${encodeURIComponent(title)}&format=json&origin=*`;
   const res = await fetch(url);
@@ -183,6 +219,20 @@ async function fetchIntroText(title) {
   return text;
 }
 
+async function callGuideAPI(payload) {
+  const res = await fetch(GUIDE_API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error || `Guide request failed (${res.status})`);
+  }
+  if (!data?.text) throw new Error("The guide gave an empty response.");
+  return data.text;
+}
+
 function createApp() {
   const app = document.querySelector("#app");
   if (!app) return;
@@ -191,8 +241,15 @@ function createApp() {
     <div class="map-shell">
       <div id="map" class="map" role="application" aria-label="Map"></div>
       <div class="map-overlay map-overlay--top">
-        <p class="map-title">Tour Guide</p>
-        <p class="map-hint" id="map-hint">Street map (not satellite). Zoom in to see blocks and building shapes. Use the layers control (top-right) to switch styles.</p>
+        <div class="map-overlay__row">
+          <div>
+            <p class="map-title">Tour Guide</p>
+            <p class="map-hint" id="map-hint">Street map (not satellite). Zoom in to see blocks and building shapes. Use the layers control (top-right) to switch styles.</p>
+          </div>
+          <button type="button" class="btn-walk-tour" id="btn-walk-tour" aria-pressed="false">
+            🔈 Start Walking Tour
+          </button>
+        </div>
       </div>
       <button type="button" class="btn-recenter" id="btn-recenter" title="Center on my location" aria-label="Center on my location">
         ⊕
@@ -209,13 +266,15 @@ function createApp() {
             <h2 class="landmark-sheet__title" id="landmark-sheet-title"></h2>
             <button type="button" class="landmark-sheet__close" id="landmark-sheet-close" aria-label="Close">×</button>
           </header>
-          <div class="landmark-sheet__body" id="landmark-sheet-body"></div>
+          <div class="landmark-sheet__feed" id="landmark-feed" aria-live="polite"></div>
           <footer class="landmark-sheet__footer">
-            <button type="button" class="btn-listen" id="btn-listen" disabled>
-              Listen to introduction
-            </button>
+            <form class="ask-row" id="ask-form">
+              <button type="button" class="btn-mic" id="btn-mic" hidden title="Ask by voice" aria-label="Ask by voice">🎤</button>
+              <input type="text" class="ask-input" id="ask-input" placeholder="Ask the guide a question…" autocomplete="off" />
+              <button type="submit" class="btn-ask-send" id="btn-ask-send">Ask</button>
+            </form>
             <button type="button" class="btn-stop-audio" id="btn-stop-speech" hidden>
-              Stop audio
+              Stop voice
             </button>
           </footer>
         </div>
@@ -228,12 +287,15 @@ function createApp() {
   const mapEl = app.querySelector("#map");
   const hintEl = app.querySelector("#map-hint");
   const btnRecenter = app.querySelector("#btn-recenter");
+  const btnWalkTour = app.querySelector("#btn-walk-tour");
   const landmarkSheet = app.querySelector("#landmark-sheet");
   const landmarkBackdrop = app.querySelector("#landmark-backdrop");
   const landmarkTitle = app.querySelector("#landmark-sheet-title");
-  const landmarkBody = app.querySelector("#landmark-sheet-body");
+  const landmarkFeed = app.querySelector("#landmark-feed");
   const btnLandmarkClose = app.querySelector("#landmark-sheet-close");
-  const btnListen = app.querySelector("#btn-listen");
+  const askForm = app.querySelector("#ask-form");
+  const askInput = app.querySelector("#ask-input");
+  const btnMic = app.querySelector("#btn-mic");
   const btnStopSpeech = app.querySelector("#btn-stop-speech");
 
   let map;
@@ -242,15 +304,52 @@ function createApp() {
   let userPos = null;
   let loadToken = 0;
   /** @type {string | null} */
-  let currentIntroText = null;
-  /** @type {string | null} */
   let currentLandmarkTitle = null;
+  /** Raw landmarks currently shown on the map, used for walking-tour proximity checks. */
+  let currentLandmarks = [];
+  /** Landmarks already introduced this session (tapped or auto-narrated). */
+  const narratedIds = new Set();
+  /** Landmarks waiting to be auto-narrated as the user walks. */
+  let narrationQueue = [];
+  let walkingTourActive = false;
+  /** Shared conversation memory across the whole walk, so the guide "remembers" prior stops. */
+  let conversationHistory = [];
+
+  function trimHistory() {
+    if (conversationHistory.length > MAX_HISTORY_TURNS) {
+      conversationHistory.splice(0, conversationHistory.length - MAX_HISTORY_TURNS);
+    }
+  }
 
   function clearLandmarkMarkers() {
     while (landmarkMarkers.length) {
       const m = landmarkMarkers.pop();
       map?.removeLayer(m);
     }
+  }
+
+  function checkProximity(lat, lng) {
+    if (!walkingTourActive) return;
+    for (const place of currentLandmarks) {
+      if (narratedIds.has(place.pageId)) continue;
+      if (narrationQueue.some((p) => p.pageId === place.pageId)) continue;
+      const d = distanceMeters(lat, lng, place.lat, place.lon);
+      if (d <= WALK_PROXIMITY_M) {
+        narrationQueue.push(place);
+      }
+    }
+    processNarrationQueue();
+  }
+
+  function processNarrationQueue() {
+    if (!walkingTourActive) {
+      narrationQueue = [];
+      return;
+    }
+    if (!landmarkSheet.hidden) return;
+    const next = narrationQueue.shift();
+    if (!next) return;
+    openLandmarkSheet(next, { auto: true });
   }
 
   async function refreshLandmarks() {
@@ -268,6 +367,7 @@ function createApp() {
       if (myToken !== loadToken) return;
 
       clearLandmarkMarkers();
+      currentLandmarks = raw;
 
       for (const place of raw) {
         const marker = L.marker([place.lat, place.lon], {
@@ -278,6 +378,8 @@ function createApp() {
       }
 
       hintEl.textContent = `${raw.length} place${raw.length === 1 ? "" : "s"} in view (~${formatRadius(radiusM)} search). Tap a pin for details.`;
+
+      if (userPos) checkProximity(userPos.lat, userPos.lng);
     } catch (e) {
       if (myToken !== loadToken) return;
       hintEl.textContent =
@@ -292,47 +394,93 @@ function createApp() {
     return `${(m / 1000).toFixed(1)} km`;
   }
 
+  function addFeedBubble(role, html) {
+    const div = document.createElement("div");
+    div.className = `feed-bubble feed-bubble--${role}`;
+    div.innerHTML = html;
+    landmarkFeed.appendChild(div);
+    landmarkFeed.scrollTop = landmarkFeed.scrollHeight;
+    return div;
+  }
+
+  function stopListening() {
+    if (listening) recognizer?.abort?.();
+    listening = false;
+    btnMic?.classList.remove("btn-mic--active");
+  }
+
   function closeLandmarkSheet() {
     window.speechSynthesis?.cancel();
-    currentIntroText = null;
-    currentLandmarkTitle = null;
+    stopListening();
     btnStopSpeech.hidden = true;
     landmarkSheet.hidden = true;
     landmarkSheet.setAttribute("aria-hidden", "true");
+    currentLandmarkTitle = null;
+    processNarrationQueue();
   }
 
-  function openLandmarkSheet(place) {
+  function openLandmarkSheet(place, opts = {}) {
+    const auto = !!opts.auto;
     window.speechSynthesis?.cancel();
+    stopListening();
     btnStopSpeech.hidden = true;
-    currentIntroText = null;
-    currentLandmarkTitle = null;
+    narratedIds.add(place.pageId);
+    currentLandmarkTitle = place.title;
     landmarkTitle.textContent = place.title;
-    landmarkBody.innerHTML =
-      '<p class="landmark-sheet__loading">Loading information…</p>';
-    btnListen.disabled = true;
+    landmarkFeed.innerHTML = "";
+    askInput.disabled = false;
+    if (btnMic) btnMic.disabled = false;
     landmarkSheet.hidden = false;
     landmarkSheet.setAttribute("aria-hidden", "false");
+    if (!auto) askInput.focus({ preventScroll: true });
+
+    const loadingBubble = addFeedBubble(
+      "guide loading",
+      '<span class="feed-bubble__loading">Getting to know this place…</span>',
+    );
 
     void (async () => {
+      let extract = "";
       try {
-        const text = await fetchIntroText(place.title);
-        currentIntroText = text;
-        currentLandmarkTitle = place.title;
-        landmarkBody.innerHTML = `
-          <p class="landmark-sheet__intro">${escapeHtml(text)}</p>
-          <p class="landmark-sheet__wiki">
-            <a href="${wikiArticleUrl(place.title)}" target="_blank" rel="noopener noreferrer">Open full article on Wikipedia</a>
-          </p>`;
-        btnListen.disabled = !window.speechSynthesis;
-        btnListen.title = window.speechSynthesis
-          ? ""
-          : "Speech is not available in this browser.";
+        extract = await fetchIntroText(place.title);
+      } catch {
+        extract = "";
+      }
+
+      try {
+        const narration = await callGuideAPI({
+          mode: "narrate",
+          landmark: { title: place.title, extract },
+        });
+        loadingBubble.remove();
+        addFeedBubble(
+          "guide",
+          `<p>${escapeHtml(narration)}</p>${wikiLinkHtml(place.title)}`,
+        );
+        conversationHistory.push({ role: "assistant", content: narration });
+        trimHistory();
+        btnStopSpeech.hidden = false;
+        speakText(narration, () => {
+          btnStopSpeech.hidden = true;
+        });
       } catch (e) {
-        const msg =
-          e instanceof Error ? e.message : "Could not load information.";
-        landmarkBody.innerHTML = `<p class="landmark-sheet__error">${escapeHtml(msg)}</p>`;
-        btnListen.disabled = true;
-        btnListen.title = "";
+        loadingBubble.remove();
+        if (extract) {
+          addFeedBubble(
+            "guide",
+            `<p>${escapeHtml(extract)}</p>${wikiLinkHtml(place.title)}`,
+          );
+          btnStopSpeech.hidden = false;
+          speakTourGuide(place.title, extract, () => {
+            btnStopSpeech.hidden = true;
+          });
+        } else {
+          const msg =
+            e instanceof Error
+              ? e.message
+              : "Could not load information about this place.";
+          addFeedBubble("error", escapeHtml(msg));
+        }
       }
     })();
   }
@@ -341,20 +489,112 @@ function createApp() {
     openLandmarkSheet(place);
   }
 
+  async function handleAsk(question) {
+    addFeedBubble("user", escapeHtml(question));
+    const priorHistory = conversationHistory.slice();
+    conversationHistory.push({ role: "user", content: question });
+    btnStopSpeech.hidden = true;
+
+    const thinkingBubble = addFeedBubble(
+      "guide loading",
+      '<span class="feed-bubble__loading">…</span>',
+    );
+
+    try {
+      const answer = await callGuideAPI({
+        mode: "chat",
+        landmark: currentLandmarkTitle ? { title: currentLandmarkTitle } : null,
+        history: priorHistory,
+        question,
+      });
+      thinkingBubble.remove();
+      addFeedBubble("guide", `<p>${escapeHtml(answer)}</p>`);
+      conversationHistory.push({ role: "assistant", content: answer });
+      trimHistory();
+      btnStopSpeech.hidden = false;
+      speakText(answer, () => {
+        btnStopSpeech.hidden = true;
+      });
+    } catch (e) {
+      thinkingBubble.remove();
+      const msg =
+        e instanceof Error ? e.message : "Could not get a response.";
+      addFeedBubble("error", escapeHtml(msg));
+    }
+  }
+
   btnLandmarkClose.addEventListener("click", closeLandmarkSheet);
   landmarkBackdrop.addEventListener("click", closeLandmarkSheet);
 
-  btnListen.addEventListener("click", () => {
-    if (!currentIntroText || !currentLandmarkTitle) return;
-    btnStopSpeech.hidden = false;
-    speakTourGuide(currentLandmarkTitle, currentIntroText, () => {
-      btnStopSpeech.hidden = true;
-    });
+  askForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const q = askInput.value.trim();
+    if (!q) return;
+    askInput.value = "";
+    void handleAsk(q);
+  });
+
+  let recognizer = null;
+  let listening = false;
+  const SpeechRecognitionCtor = getSpeechRecognitionCtor();
+  if (SpeechRecognitionCtor) {
+    btnMic.hidden = false;
+    recognizer = new SpeechRecognitionCtor();
+    recognizer.lang = "en-US";
+    recognizer.interimResults = false;
+    recognizer.maxAlternatives = 1;
+    recognizer.onresult = (ev) => {
+      const text = ev.results?.[0]?.[0]?.transcript?.trim();
+      if (text) void handleAsk(text);
+    };
+    recognizer.onend = () => {
+      listening = false;
+      btnMic.classList.remove("btn-mic--active");
+    };
+    recognizer.onerror = () => {
+      listening = false;
+      btnMic.classList.remove("btn-mic--active");
+    };
+  }
+
+  btnMic?.addEventListener("click", () => {
+    if (!recognizer) return;
+    if (listening) {
+      recognizer.stop();
+      return;
+    }
+    window.speechSynthesis?.cancel();
+    listening = true;
+    btnMic.classList.add("btn-mic--active");
+    try {
+      recognizer.start();
+    } catch {
+      listening = false;
+      btnMic.classList.remove("btn-mic--active");
+    }
   });
 
   btnStopSpeech.addEventListener("click", () => {
     window.speechSynthesis?.cancel();
     btnStopSpeech.hidden = true;
+  });
+
+  btnWalkTour.addEventListener("click", () => {
+    walkingTourActive = !walkingTourActive;
+    btnWalkTour.textContent = walkingTourActive
+      ? "🔊 Walking Tour: On"
+      : "🔈 Start Walking Tour";
+    btnWalkTour.classList.toggle("btn-walk-tour--active", walkingTourActive);
+    btnWalkTour.setAttribute("aria-pressed", String(walkingTourActive));
+    if (walkingTourActive) {
+      speakText(
+        "Walking tour is on. I'll speak up as we pass interesting places nearby.",
+      );
+      if (userPos) checkProximity(userPos.lat, userPos.lng);
+    } else {
+      narrationQueue = [];
+      if (landmarkSheet.hidden) window.speechSynthesis?.cancel();
+    }
   });
 
   document.addEventListener("keydown", (e) => {
@@ -365,8 +605,8 @@ function createApp() {
 
   function setUserMarkerPosition(lat, lng) {
     userPos = { lat, lng };
-    if (!userMarker) return;
-    userMarker.setLatLng([lat, lng]);
+    if (userMarker) userMarker.setLatLng([lat, lng]);
+    checkProximity(lat, lng);
   }
 
   function recenterMap() {
@@ -425,6 +665,9 @@ function createApp() {
     userMarker.bindTooltip("Your location", { permanent: false });
 
     map.on("moveend", () => debouncedRefresh());
+    // Leaflet doesn't fire "moveend" for the initial setView() above, so
+    // without this the map would sit empty until the user pans or zooms.
+    refreshLandmarks();
 
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(
