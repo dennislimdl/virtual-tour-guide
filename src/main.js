@@ -1,19 +1,56 @@
-import L from "leaflet";
-import "leaflet/dist/leaflet.css";
-import iconUrl from "leaflet/dist/images/marker-icon.png";
-import iconRetinaUrl from "leaflet/dist/images/marker-icon-2x.png";
-import shadowUrl from "leaflet/dist/images/marker-shadow.png";
+import { setOptions, importLibrary } from "@googlemaps/js-api-loader";
 import "./style.css";
-
-L.Icon.Default.mergeOptions({
-  iconUrl,
-  iconRetinaUrl,
-  shadowUrl,
-});
 
 const WIKI_GEO =
   "https://en.wikipedia.org/w/api.php?action=query&list=geosearch&format=json&origin=*";
 const GUIDE_API = "/api/guide";
+const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+
+// Dark theme matching the app's UI (see :root in style.css), with the
+// default POI/transit layers hidden so our own Wikipedia-driven landmark
+// markers are the only points of interest on the map.
+const DARK_MAP_STYLE = [
+  { elementType: "geometry", stylers: [{ color: "#1a2332" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#1a2332" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#8b9cb3" }] },
+  {
+    featureType: "administrative",
+    elementType: "geometry",
+    stylers: [{ color: "#3a4a5c" }],
+  },
+  { featureType: "poi", stylers: [{ visibility: "off" }] },
+  {
+    featureType: "road",
+    elementType: "geometry",
+    stylers: [{ color: "#2a3648" }],
+  },
+  {
+    featureType: "road",
+    elementType: "geometry.stroke",
+    stylers: [{ color: "#1a2332" }],
+  },
+  {
+    featureType: "road.highway",
+    elementType: "geometry",
+    stylers: [{ color: "#3d4f63" }],
+  },
+  {
+    featureType: "road.arterial",
+    elementType: "labels.text.fill",
+    stylers: [{ color: "#8b9cb3" }],
+  },
+  { featureType: "transit", stylers: [{ visibility: "off" }] },
+  {
+    featureType: "water",
+    elementType: "geometry",
+    stylers: [{ color: "#0d1620" }],
+  },
+  {
+    featureType: "water",
+    elementType: "labels.text.fill",
+    stylers: [{ color: "#5a7a94" }],
+  },
+];
 
 const DEBOUNCE_MS = 550;
 const MIN_RADIUS_M = 80;
@@ -48,7 +85,7 @@ function radiusFromMap(map) {
   const c = map.getCenter();
   if (!b || !c) return 2000;
   const ne = b.getNorthEast();
-  const r = distanceMeters(c.lat, c.lng, ne.lat, ne.lng);
+  const r = distanceMeters(c.lat(), c.lng(), ne.lat(), ne.lng());
   return Math.round(
     Math.min(MAX_RADIUS_M, Math.max(MIN_RADIUS_M, r * 1.05)),
   );
@@ -248,7 +285,7 @@ function createApp() {
         <div class="map-overlay__row">
           <div>
             <p class="map-title">Tour Guide</p>
-            <p class="map-hint" id="map-hint">Street map (not satellite). Zoom in to see blocks and building shapes. Use the layers control (top-right) to switch styles.</p>
+            <p class="map-hint" id="map-hint">Loading map…</p>
           </div>
           <button type="button" class="btn-walk-tour" id="btn-walk-tour" aria-pressed="false">
             🔈 Start Walking Tour
@@ -291,6 +328,21 @@ function createApp() {
 
   const mapEl = app.querySelector("#map");
   const hintEl = app.querySelector("#map-hint");
+
+  if (!GOOGLE_MAPS_API_KEY) {
+    hintEl.textContent =
+      "Google Maps API key not configured. Set VITE_GOOGLE_MAPS_API_KEY.";
+    return;
+  }
+
+  setOptions({ key: GOOGLE_MAPS_API_KEY, v: "weekly" });
+  // Start loading the Maps JS API in parallel with waiting for a GPS fix,
+  // rather than one after the other.
+  const mapsLibrariesPromise = Promise.all([
+    importLibrary("maps"),
+    importLibrary("marker"),
+  ]);
+
   const btnRecenter = app.querySelector("#btn-recenter");
   const gpsBadge = app.querySelector("#gps-badge");
   const btnWalkTour = app.querySelector("#btn-walk-tour");
@@ -307,6 +359,8 @@ function createApp() {
   let map;
   let userMarker;
   let userAccuracyCircle;
+  let GoogleMarker;
+  let GoogleCircle;
   const landmarkMarkers = [];
   let userPos = null;
   let userAccuracyM = null;
@@ -332,7 +386,7 @@ function createApp() {
   function clearLandmarkMarkers() {
     while (landmarkMarkers.length) {
       const m = landmarkMarkers.pop();
-      map?.removeLayer(m);
+      m.setMap(null);
     }
   }
 
@@ -366,8 +420,8 @@ function createApp() {
   async function refreshLandmarks() {
     if (!map) return;
     const c = map.getCenter();
-    const lat = c.lat;
-    const lon = c.lng;
+    const lat = c.lat();
+    const lon = c.lng();
     const radiusM = radiusFromMap(map);
     const myToken = ++loadToken;
 
@@ -381,10 +435,12 @@ function createApp() {
       currentLandmarks = raw;
 
       for (const place of raw) {
-        const marker = L.marker([place.lat, place.lon], {
+        const marker = new GoogleMarker({
+          position: { lat: place.lat, lng: place.lon },
+          map,
           title: place.title,
-        }).addTo(map);
-        marker.on("click", () => onLandmarkClick(place));
+        });
+        marker.addListener("click", () => onLandmarkClick(place));
         landmarkMarkers.push(marker);
       }
 
@@ -635,9 +691,9 @@ function createApp() {
   function setUserMarkerPosition(lat, lng, accuracy) {
     userPos = { lat, lng };
     userAccuracyM = typeof accuracy === "number" ? accuracy : null;
-    if (userMarker) userMarker.setLatLng([lat, lng]);
+    if (userMarker) userMarker.setPosition({ lat, lng });
     if (userAccuracyCircle && userAccuracyM != null) {
-      userAccuracyCircle.setLatLng([lat, lng]);
+      userAccuracyCircle.setCenter({ lat, lng });
       userAccuracyCircle.setRadius(userAccuracyM);
     }
     updateGpsBadge(userAccuracyM);
@@ -646,76 +702,78 @@ function createApp() {
 
   function recenterMap() {
     if (!map || !userPos) return;
-    map.setView([userPos.lat, userPos.lng], Math.max(map.getZoom(), 15));
+    map.setCenter({ lat: userPos.lat, lng: userPos.lng });
+    map.setZoom(Math.max(map.getZoom(), 15));
   }
 
   btnRecenter.addEventListener("click", recenterMap);
 
-  function initMap(lat, lng, zoom, accuracy) {
-    map = L.map(mapEl, {
+  async function initMap(lat, lng, zoom, accuracy) {
+    let libs;
+    try {
+      libs = await mapsLibrariesPromise;
+    } catch {
+      hintEl.textContent =
+        "Could not load Google Maps. Check your connection, or that the API key is valid and unrestricted for this domain.";
+      return;
+    }
+    const [{ Map, Circle }, { Marker }] = libs;
+    GoogleMarker = Marker;
+    GoogleCircle = Circle;
+
+    map = new Map(mapEl, {
+      center: { lat, lng },
+      zoom,
+      styles: DARK_MAP_STYLE,
+      mapTypeControl: true,
+      mapTypeControlOptions: {
+        position: google.maps.ControlPosition.TOP_RIGHT,
+        style: google.maps.MapTypeControlStyle.DROPDOWN_MENU,
+      },
+      streetViewControl: false,
+      fullscreenControl: false,
       zoomControl: true,
-      maxZoom: 19,
-    }).setView([lat, lng], zoom);
-
-    const attrOsm =
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
-    const attrCarto = `${attrOsm} &copy; <a href="https://carto.com/attributions">CARTO</a>`;
-
-    // Carto "Voyager": street-focused; building footprints show in many areas when zoomed in (not 3D, not satellite).
-    const streetsLayer = L.tileLayer(
-      "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
-      {
-        maxZoom: 19,
-        attribution: attrCarto,
-      },
-    );
-
-    const standardLayer = L.tileLayer(
-      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-      {
-        maxZoom: 19,
-        attribution: attrOsm,
-      },
-    );
-
-    streetsLayer.addTo(map);
-
-    L.control.layers(
-      {
-        "Streets (buildings)": streetsLayer,
-        "Standard": standardLayer,
-      },
-      null,
-      { position: "topright", collapsed: true },
-    ).addTo(map);
+      clickableIcons: false,
+      // Full-screen dedicated map, not an embed on a scrollable page — a
+      // one-finger drag should pan immediately instead of requiring two
+      // fingers (Google's default "cooperative" gesture handling).
+      gestureHandling: "greedy",
+    });
 
     // Shows the GPS fix's reported error radius, so it's visible (not just
     // implied) when a reading is too imprecise to trust for narration.
-    userAccuracyCircle = L.circle([lat, lng], {
+    userAccuracyCircle = new GoogleCircle({
+      map,
+      center: { lat, lng },
       radius: accuracy || 0,
-      color: "#4285F4",
-      weight: 1,
+      strokeColor: "#4285F4",
+      strokeWeight: 1,
       fillColor: "#4285F4",
       fillOpacity: 0.12,
-      interactive: false,
-    }).addTo(map);
+      clickable: false,
+    });
 
-    userMarker = L.circleMarker([lat, lng], {
-      radius: 10,
-      fillColor: "#4285F4",
-      color: "#ffffff",
-      weight: 2,
-      opacity: 1,
-      fillOpacity: 1,
-    }).addTo(map);
-    userMarker.bindTooltip("Your location", { permanent: false });
+    userMarker = new GoogleMarker({
+      map,
+      position: { lat, lng },
+      title: "Your location",
+      icon: {
+        path: google.maps.SymbolPath.CIRCLE,
+        scale: 10,
+        fillColor: "#4285F4",
+        fillOpacity: 1,
+        strokeColor: "#ffffff",
+        strokeWeight: 2,
+      },
+    });
 
     userAccuracyM = typeof accuracy === "number" ? accuracy : null;
     updateGpsBadge(userAccuracyM);
 
-    map.on("moveend", () => debouncedRefresh());
-    // Leaflet doesn't fire "moveend" for the initial setView() above, so
-    // without this the map would sit empty until the user pans or zooms.
+    map.addListener("idle", () => debouncedRefresh());
+    // Belt-and-suspenders: "idle" should already fire once after the map's
+    // initial render, but trigger the first load explicitly too so the map
+    // never sits empty if that doesn't happen for some reason.
     refreshLandmarks();
 
     if (navigator.geolocation) {
