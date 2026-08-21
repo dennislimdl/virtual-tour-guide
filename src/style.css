@@ -53,14 +53,6 @@ body {
   z-index: 0;
 }
 
-.leaflet-container {
-  font-family: inherit;
-}
-
-.leaflet-top.leaflet-right {
-  z-index: 1001;
-}
-
 .map-overlay {
   position: absolute;
   left: 0;
